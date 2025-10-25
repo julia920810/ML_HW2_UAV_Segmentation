@@ -25,6 +25,23 @@ from optuna.pruners import SuccessiveHalvingPruner
 NUM_CLASSES = 16
 
 # -------------------------- utils --------------------------
+# ---- Edge/Sharpen block: image-only (不會作用在 mask) ----
+def edge_enhance_block(p=0.8):
+    """
+    邊緣/對比增強（只對 image 作用；在 Albumentations 中，這些轉換不會改 mask）
+    p: 套用機率
+    """
+    return A.OneOf([
+        # 反銳化遮罩：提升局部對比感
+        A.UnsharpMask(blur_limit=(3, 7), alpha=(0.7, 1.0), p=1.0),
+        # 銳化（可視化邊界）
+        A.Sharpen(alpha=(0.15, 0.35), lightness=(0.9, 1.1), p=1.0),
+        # 局部對比增強（在霧/灰塵下讓邊界更清晰）
+        A.CLAHE(clip_limit=(2.0, 4.0), tile_grid_size=(8, 8), p=1.0),
+        # 浮雕（弱化版，讓邊緣更“起來”，但不至於過度）
+        A.Emboss(alpha=(0.1, 0.25), strength=(0.2, 0.5), p=1.0),
+    ], p=p)
+
 def set_seed(seed=42):
     random.seed(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
@@ -42,17 +59,27 @@ class SegDataset(Dataset):
                 self.tfm = A.Compose([
                     A.SmallestMaxSize(max_size=img_size),
                     A.PadIfNeeded(img_size, img_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
-                    A.RandomCrop(img_size, img_size), A.HorizontalFlip(p=0.5), A.ColorJitter(p=0.3),
-                    A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)), ToTensorV2()
+                    A.RandomCrop(img_size, img_size),
+                    A.HorizontalFlip(p=0.5),
+                    A.ColorJitter(p=0.3),
+
+                    # ⬇️ 新增：溫和的邊緣強化
+                    edge_enhance_block(p=0.35),
+
+                    A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)),
+                    ToTensorV2()
                 ])
+
             elif augment_pack == "strong":
                 self.tfm = A.Compose([
                     A.SmallestMaxSize(max_size=img_size),
                     A.PadIfNeeded(img_size, img_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
                     A.RandomResizedCrop(img_size, img_size, scale=(0.6,1.2), ratio=(0.9,1.1), p=1.0),
                     A.HorizontalFlip(p=0.5),
-                    A.ShiftScaleRotate(shift_limit=0.08, scale_limit=0.20, rotate_limit=20, border_mode=cv2.BORDER_CONSTANT, p=0.7),
-                    A.RandomBrightnessContrast(p=0.6), A.ColorJitter(p=0.5),
+                    A.ShiftScaleRotate(shift_limit=0.08, scale_limit=0.20, rotate_limit=20,
+                                    border_mode=cv2.BORDER_CONSTANT, p=0.7),
+                    A.RandomBrightnessContrast(p=0.6),
+                    A.ColorJitter(p=0.5),
                     A.OneOf([
                         A.RandomFog(fog_coef_lower=0.05, fog_coef_upper=0.25, alpha_coef=0.04, p=0.5),
                         A.RandomRain(slant_lower=-10, slant_upper=10, drop_length=12, blur_value=3, p=0.4),
@@ -61,15 +88,41 @@ class SegDataset(Dataset):
                     ], p=0.7),
                     A.MotionBlur(blur_limit=5, p=0.3),
                     A.ImageCompression(quality_lower=55, quality_upper=90, p=0.35),
-                    A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)), ToTensorV2()
+
+                    # ⬇️ 新增：強一點的邊緣強化
+                    edge_enhance_block(p=0.8),
+
+                    A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)),
+                    ToTensorV2()
                 ])
-            else:  # weather (你的原版)
+
+            elif augment_pack == "edge":
+                # 專注於邊界/對比，外觀干擾較少；適合你說的「不受天氣干擾也能辨識」
                 self.tfm = A.Compose([
                     A.SmallestMaxSize(max_size=img_size),
                     A.PadIfNeeded(img_size, img_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
-                    A.RandomCrop(img_size, img_size), A.HorizontalFlip(p=0.5),
+                    A.RandomCrop(img_size, img_size),
+                    A.HorizontalFlip(p=0.5),
+                    # 只做輕量的顏色/對比變化，避免整張變糊
+                    A.RandomBrightnessContrast(p=0.4),
+                    A.ColorJitter(p=0.25),
+
+                    # ⬇️ 核心：邊緣/對比強化
+                    edge_enhance_block(p=0.8),
+
+                    A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)),
+                    ToTensorV2()
+                ])
+
+            else:  # "weather"
+                self.tfm = A.Compose([
+                    A.SmallestMaxSize(max_size=img_size),
+                    A.PadIfNeeded(img_size, img_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
+                    A.RandomCrop(img_size, img_size),
+                    A.HorizontalFlip(p=0.5),
                     A.ShiftScaleRotate(0.05, 0.10, 15, border_mode=cv2.BORDER_CONSTANT, p=0.5),
-                    A.RandomBrightnessContrast(p=0.5), A.ColorJitter(p=0.3),
+                    A.RandomBrightnessContrast(p=0.5),
+                    A.ColorJitter(p=0.3),
                     A.OneOf([
                         A.RandomFog(fog_coef_lower=0.05, fog_coef_upper=0.20, alpha_coef=0.04, p=0.6),
                         A.RandomRain(slant_lower=-8, slant_upper=8, drop_length=10, blur_value=3, p=0.3),
@@ -78,15 +131,23 @@ class SegDataset(Dataset):
                     ], p=0.6),
                     A.ISONoise(color_shift=(0.01,0.05), intensity=(0.1,0.3), p=0.3),
                     A.GlassBlur(sigma=0.2, max_delta=1, iterations=1, p=0.15),
-                    A.MotionBlur(blur_limit=3, p=0.2), A.ImageCompression(60, 90, p=0.3),
-                    A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)), ToTensorV2()
+                    A.MotionBlur(blur_limit=3, p=0.2),
+                    A.ImageCompression(60, 90, p=0.3),
+
+                    # ⬇️ 新增：中等強度的邊緣強化
+                    edge_enhance_block(p=0.5),
+
+                    A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)),
+                    ToTensorV2()
                 ])
         else:
             self.tfm = A.Compose([
                 A.LongestMaxSize(max_size=img_size),
                 A.PadIfNeeded(img_size, img_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
-                A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)), ToTensorV2()
+                A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)),
+                ToTensorV2()
             ])
+
     def __len__(self): return len(self.names)
     def __getitem__(self, i):
         name = self.names[i]
@@ -147,17 +208,30 @@ def build_model(aux_loss: bool, no_pretrain: bool, device):
 
 # -------------------------- Optuna 目標 --------------------------
 
-def make_loaders(img_dir, mask_dir, img_size, batch_size, val_split, seed, num_workers, augment_pack="weather"):
-    index_ds = SegDataset(img_dir, mask_dir, img_size=img_size, train=True)
-    n_total = len(index_ds); n_val = max(1, int(n_total*val_split))
-    g = torch.Generator().manual_seed(seed); perm = torch.randperm(n_total, generator=g)
-    val_idx = perm[:n_val]; train_idx = perm[n_val:]
-    train_base = SegDataset(img_dir, mask_dir, img_size=img_size, train=True, augment_pack=augment_pack)
-    val_base   = SegDataset(img_dir, mask_dir, img_size=img_size, train=False)
-    train_set = Subset(train_base, train_idx); val_set = Subset(val_base, val_idx)
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True, persistent_workers=False)
-    val_loader   = DataLoader(val_set,   batch_size=max(1,batch_size//2), shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=False)
+def make_loaders(train_img_dir, train_mask_dir, val_img_dir, val_mask_dir,
+                 img_size, batch_size, seed, num_workers, augment_pack="weather"):
+    """
+    自動建立 train / val DataLoader，直接使用分好資料夾的資料。
+    """
+    set_seed(seed)
+
+    # 建立 dataset
+    train_set = SegDataset(train_img_dir, train_mask_dir,
+                           img_size=img_size, train=True, augment_pack=augment_pack)
+    val_set = SegDataset(val_img_dir, val_mask_dir,
+                         img_size=img_size, train=False)
+
+    train_loader = DataLoader(
+        train_set, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=True, drop_last=True
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=max(1, batch_size // 2), shuffle=False,
+        num_workers=num_workers, pin_memory=True
+    )
+
     return train_loader, val_loader
+
 
 
 def objective(trial, base_args):
@@ -167,10 +241,11 @@ def objective(trial, base_args):
     args.lr            = trial.suggest_float("lr", 3e-4, 3e-2, log=True)
     args.weight_decay  = trial.suggest_float("weight_decay", 1e-6, 5e-3, log=True)
     args.img_size      = trial.suggest_categorical("img_size", [512, 600])
-    args.batch_size    = trial.suggest_categorical("batch_size", [2, 4])
+    args.batch_size    = trial.suggest_categorical("batch_size", [4, 8])
     args.aux_loss      = trial.suggest_categorical("aux_loss", [False, True])
     args.no_pretrain   = trial.suggest_categorical("no_pretrain", [False, True])
-    args.augment_pack  = trial.suggest_categorical("augment_pack", ["basic","weather","strong"])
+    args.augment_pack  = trial.suggest_categorical("augment_pack",["weather", "strong", "edge"])
+
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, val_loader = make_loaders(args.img_dir, args.mask_dir, args.img_size, args.batch_size, args.val_split, args.seed, args.num_workers, args.augment_pack)
@@ -212,11 +287,11 @@ def objective(trial, base_args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--img_dir", type=str, default="UAV_dataset/train/imgs")
-    p.add_argument("--mask_dir", type=str, default="UAV_dataset/train/masks")
+    p.add_argument("--img_dir", type=str, default="UAV_dataset/dataset_split/train/imgs")
+    p.add_argument("--mask_dir", type=str, default="UAV_dataset/dataset_split/train/masks")
     p.add_argument("--val_split", type=float, default=0.2)
     p.add_argument("--img_size", type=int, default=512)  # 起始值，會被 trials 覆蓋
-    p.add_argument("--batch_size", type=int, default=4)  # 起始值，會被 trials 覆蓋
+    p.add_argument("--batch_size", type=int, default=8)  # 起始值，會被 trials 覆蓋
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=1e-4)
@@ -226,8 +301,8 @@ def main():
     p.add_argument("--save_dir", type=str, default="./outputs_optuna")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--num_workers", type=int, default=4)
-    p.add_argument("--optuna_trials", type=int, default=20)
-    p.add_argument("--proxy_epochs", type=int, default=12)
+    p.add_argument("--optuna_trials", type=int, default=1)
+    p.add_argument("--proxy_epochs", type=int, default=5)
     p.add_argument("--study_name", type=str, default="uav_seg_optuna")
     p.add_argument("--storage", type=str, default=None)
     p.add_argument("--direction", type=str, default="maximize")
