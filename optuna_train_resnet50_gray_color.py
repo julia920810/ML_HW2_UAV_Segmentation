@@ -342,7 +342,7 @@ def main():
     train_loader, val_loader = make_loaders(
         args.train_img_dir, args.train_mask_dir,
         args.val_img_dir, args.val_mask_dir,
-        args.img_size, args.batch_size, args.seed, args.num_workers
+        args.img_size, args.batch_size, args.seed, args.num_workers)
     best_miou, _, _ = train_one_phase(
             args=args, device=device, train_loader=train_loader, val_loader=val_loader,
             aux_loss=args.aux_loss, no_pretrain=args.no_pretrain,
