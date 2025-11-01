@@ -86,9 +86,13 @@ def get_base_transform(img_size):
         A.SmallestMaxSize(max_size=img_size),
         A.PadIfNeeded(img_size, img_size, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0),
         A.RandomCrop(img_size, img_size),
+        A.HorizontalFlip(p=0.5),
+        A.ShiftScaleRotate(shift_limit=0.02, scale_limit=0.05, rotate_limit=10,
+                           border_mode=cv2.BORDER_CONSTANT, p=0.3),
         A.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5)),
         ToTensorV2()
     ], additional_targets={'mask': 'mask'})
+
 
 def get_val_transform(img_size):
     return A.Compose([
